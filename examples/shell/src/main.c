@@ -10,6 +10,12 @@
 LOG_MODULE_REGISTER(shell_app);
 const struct device *dev;
 
+static void rtc_alarm_callback_handler(const struct device *dev, uint16_t id,
+						void *user_data)
+{
+	LOG_INF("Alarm ringing!!");
+}
+
 static int cmd_g_arribada_rtc_alarm_set(const struct shell *shell, size_t argc, char *argv[])
 {
 	// TODO need to accept alarm mask as input
@@ -34,6 +40,11 @@ static int cmd_g_arribada_rtc_alarm_set(const struct shell *shell, size_t argc, 
 	/* Set alarm */
 	alarm_time_mask_set = alarm_time_mask_supported;
 	ret = rtc_alarm_set_time(dev, 0, alarm_time_mask_set, &alarm_t);
+
+	/* Set callback function for alarm */
+	LOG_INF("Setting callback alarm function now");
+        rtc_alarm_set_callback(dev, alarm_id,
+			       rtc_alarm_callback_handler, NULL);
 	return 0;
 }
 static int cmd_g_arribada_rtc_alarm_get(const struct shell *shell, size_t argc, char *argv[])
@@ -122,6 +133,8 @@ static const struct device *get_ds3231_device(void)
 
 int main(void)
 {
+	/* Setup gpio forinterrupt */
+	
 	LOG_INF("Running DS3231 shell app on %s\n", CONFIG_BOARD);
 	dev = get_ds3231_device();
 	if (dev == NULL) {

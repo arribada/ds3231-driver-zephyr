@@ -1,10 +1,11 @@
 /*
  * Copyright (c) 2023 Arribada Initiative CIC
  *
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: MIT
  */
 #define DT_DRV_COMPAT adi_ds3231
 
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/rtc.h>
 #include <zephyr/logging/log.h>
@@ -132,8 +133,7 @@ LOG_MODULE_REGISTER(ds3231, CONFIG_RTC_LOG_LEVEL);
 #define DS3231_YEARS_OFFSET (2000 - 1900)
 
 /* Macro for interrupt pin code */
-#if DT_ANY_INST_HAS_PROP_STATUS_OKAY(int1_gpios) &&                                                \
-	(#defined(CONFIG_RTC_ALARM) || #defined(CONFIG_RTC_UPDATE))
+#if DT_ANY_INST_HAS_PROP_STATUS_OKAY(int1_gpios)
 #define DS3231_INT1_GPIOS_IN_USE 1
 #endif
 
@@ -312,6 +312,9 @@ static int ds3231_alarm_set_time(const struct device *dev, uint16_t id, uint16_t
 	LOG_INF("Mask is " PRINTF_BINARY_PATTERN_INT16, PRINTF_BYTE_TO_BINARY_INT16(mask));
 
 	if (id == 0U) {
+		/* Clear set alarms */
+		reg_INT = 0; /* TODO should we only clear the A1F flag here? */
+		ret = ds3231_write_regs(dev, DS3231_STATUS, &reg_INT, sizeof(reg_INT));
 
 		if ((mask & ~(DS3231_RTC_ALARM_1_TIME_MASK)) != 0U) {
 			LOG_ERR("unsupported alarm field mask 0x%04x", mask);
@@ -366,8 +369,61 @@ static int ds3231_alarm_set_time(const struct device *dev, uint16_t id, uint16_t
 		return -EINVAL;
 	}
 }
+#if DS3231_INT1_GPIOS_IN_USE
+static void ds3231_int1_callback_handler(const struct device *port, struct gpio_callback *cb,
+					  gpio_port_pins_t pins)
+{
+	struct ds3231_data *data = CONTAINER_OF(cb, struct ds3231_data, int1_callback);
 
+	ARG_UNUSED(port);
+	ARG_UNUSED(pins);
+
+	k_sem_give(&data->int1_sem);
+}
+
+static int ds3231_update_set_callback(const struct device *dev, rtc_update_callback callback,
+				       void *user_data)
+{
+	return 0;
+}
+
+static int ds3231_int1_enable(const struct device *dev, bool enable)
+{
+	int err = 0;
+	const struct ds3231_config *config = dev->config;
+	err = gpio_pin_interrupt_configure_dt(&config->int1, GPIO_INT_EDGE_TO_ACTIVE);
+	return 0;
+}
+
+static void ds3231_int1_thread(const struct device *dev)
+{
+	
+}
+
+static int ds3231_alarm_set_callback(const struct device *dev, uint16_t id,
+				     rtc_alarm_callback callback, void *user_data)
+{
+	const struct ds3231_config *config = dev->config;
+	struct ds3231_data *data = dev->data;
+	uint8_t control_1;
+	int err = 0;
+
+	/* Check if int1 pin is assigned */
+	if (config->int1.port == NULL) {
+		return -ENOTSUP;
+	}
+	/* Check if valid ID */
+	if (id != 0 && id != 1) {
+		LOG_ERR("Invalid ID %d - should be 0 or 1", id);
+		return -EINVAL;
+	}
+	/* Enable gpio interrupt settings */
+	ds3231_int1_enable(dev, callback != NULL);
+	return err;
+}
+#endif /* DS3231_INT1_GPIOS_IN_USE */
 #endif /* CONFIG_RTC_ALARM */
+
 static const struct rtc_driver_api ds3231_driver_api = {
 	.set_time = ds3231_set_time,
 	.get_time = ds3231_get_time,
@@ -381,17 +437,65 @@ static const struct rtc_driver_api ds3231_driver_api = {
 #endif /* DS3231_INT1_GPIOS_IN_USE */
 #endif /* CONFIG_RTC_ALARM */
 
+#if DS3231_INT1_GPIOS_IN_USE && defined(CONFIG_RTC_UPDATE)
+	.update_set_callback = ds3231_update_set_callback,
+#endif /* DS3231_INT1_GPIOS_IN_USE && defined(CONFIG_RTC_UPDATE) */
 };
 
 static int ds3231_init(const struct device *dev)
 {
 	const struct ds3231_config *config = dev->config;
-	/* struct ds3231_data *data = dev->data; */
+	struct ds3231_data *data = dev->data;
+	int err;
 	LOG_INF("Initializing the ds3231 driver");
+
+	k_mutex_init(&data->lock);
+
 	if (!i2c_is_ready_dt(&config->i2c)) {
 		LOG_ERR("I2C bus not ready");
 		return -ENODEV;
 	}
+#if DS3231_INT1_GPIOS_IN_USE
+	k_tid_t tid;
+
+	LOG_INF("Setting up interrupt thread and gpio");
+
+	if (config->int1.port != NULL) {
+		k_sem_init(&data->int1_sem, 0, INT_MAX);
+
+		if (!gpio_is_ready_dt(&config->int1)) {
+			LOG_ERR("GPIO not ready");
+			return -ENODEV;
+		}
+
+		err = gpio_pin_configure_dt(&config->int1, GPIO_INPUT);
+		if (err != 0) {
+			LOG_ERR("failed to configure GPIO (err %d)", err);
+			return -ENODEV;
+		}
+
+		gpio_init_callback(&data->int1_callback, ds3231_int1_callback_handler,
+				   BIT(config->int1.pin));
+
+		err = gpio_add_callback_dt(&config->int1, &data->int1_callback);
+		if (err != 0) {
+			LOG_ERR("failed to add GPIO callback (err %d)", err);
+			return -ENODEV;
+		}
+
+		tid = k_thread_create(&data->int1_thread, data->int1_stack,
+				      K_THREAD_STACK_SIZEOF(data->int1_stack),
+				      (k_thread_entry_t)ds3231_int1_thread, (void *)dev, NULL, NULL,
+				      CONFIG_RTC_DS3231_THREAD_PRIO, 0, K_NO_WAIT);
+		k_thread_name_set(tid, "pcf8523");
+
+		/*
+		 * Defer GPIO interrupt configuration due to INT1/CLKOUT pin sharing. This allows
+		 * using the CLKOUT square-wave signal for RTC calibration when no alarm/update
+		 * callbacks are enabled (and not configured as a wakeup-source).
+		 */
+	}
+#endif /* DS3231_INT1_GPIOS_IN_USE */
 	return 0;
 }
 
