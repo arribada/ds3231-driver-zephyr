@@ -214,7 +214,8 @@ static int ds3231_set_time(const struct device *dev, const struct rtc_time *time
 	raw_time[2] = (bin2bcd(timeptr->tm_hour / 10) << 4) + bin2bcd(timeptr->tm_hour % 10);
 	raw_time[3] = bin2bcd(timeptr->tm_wday);
 	raw_time[4] = (bin2bcd(timeptr->tm_mday / 10) << 4) + bin2bcd(timeptr->tm_mday % 10);
-	raw_time[5] = bin2bcd(timeptr->tm_mon + DS3231_MONTHS_OFFSET) & DS3231_MONTHS_MASK;
+	raw_time[5] = bin2bcd(timeptr->tm_mon + DS3231_MONTHS_OFFSET) &
+		      (DS3231_MONTH_10 | DS3231_MONTHS_MASK);
 	raw_time[6] = bin2bcd(timeptr->tm_year - DS3231_YEARS_OFFSET);
 
 	ret = ds3231_write_regs(dev, DS3231_SECONDS, raw_time, sizeof(raw_time));
@@ -239,8 +240,9 @@ static int ds3231_get_time(const struct device *dev, struct rtc_time *timeptr)
 		bcd2bin(regs[0] & DS3231_SECONDS_MASK) + bcd2bin(regs[0] & DS3231_SECONDS_10);
 	timeptr->tm_min =
 		bcd2bin(regs[1] & DS3231_MINUTES_MASK) + bcd2bin(regs[1] & DS3231_MINUTES_10);
-	timeptr->tm_hour =
-		bcd2bin(regs[2] & DS3231_HOURS_MASK) + bcd2bin(regs[2] & DS3231_HOURS_10);
+	timeptr->tm_hour = bcd2bin(regs[2] & DS3231_HOURS_MASK) +
+			   bcd2bin(regs[2] & DS3231_HOURS_10) +
+			   bcd2bin(regs[2] & DS3231_HOURS_AM_PM_20);
 	timeptr->tm_wday = bcd2bin(regs[3] & DS3231_DAYS_MASK);
 	timeptr->tm_mday = bcd2bin(regs[4] & DS3231_DATE_MASK) + bcd2bin(regs[4] & DS3231_DATE_10);
 	timeptr->tm_mon = bcd2bin(regs[5] & DS3231_MONTHS_MASK) +
