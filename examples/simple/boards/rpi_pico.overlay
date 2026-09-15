@@ -1,0 +1,13 @@
+&i2c0{
+	clock-frequency = <I2C_BITRATE_FAST>;
+	status = "okay";
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-names = "default";
+ ds3231:ds3231@68{
+		compatible = "adi,ds3231";
+		status = "okay";
+		reg = <0x68>;
+		int1-gpios = <&gpio0 6 GPIO_ACTIVE_LOW>;
+		alarms-count=<2>;
+	};
+ };
